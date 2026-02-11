@@ -15,22 +15,22 @@ CLOB_HOST = "https://clob.polymarket.com"
 CHAIN_ID = 137  # Polygon mainnet
 
 # --- Tickers to quote ---
-TICKERS = ["AAPL", "TSLA", "NVDA"]
+TICKERS = ["SPX"]
 
 # --- Quoting parameters ---
 # How much of max_incentive_spread to use (0.8 = 80% of allowed spread from mid)
 # Tighter = more rewards but more adverse selection risk
-SPREAD_PCT = 0.8
+SPREAD_PCT = 0.6
 
 # Dollar amount per side per market
 ORDER_SIZE_USD = 15.0
 
-# Midpoint drift in price units before cancel+re-place (e.g. 0.02 = 2 cents)
-REFRESH_THRESHOLD = 0.02
+# Midpoint drift as a percentage before cancel+re-place (e.g. 0.10 = 10%)
+REFRESH_THRESHOLD_PCT = 0.005
 
 # --- Timing ---
 # How often to check midpoint for drift (seconds)
-POLL_INTERVAL_SECONDS = 30
+POLL_INTERVAL_SECONDS = 0.2
 
 # Cancel all orders before NASDAQ close (ET timezone, 24h format "HH:MM")
 SHUTDOWN_TIME = "15:50"

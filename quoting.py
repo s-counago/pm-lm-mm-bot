@@ -47,28 +47,32 @@ def get_midpoint(client: ClobClient, token_id: str) -> float | None:
 def compute_quotes(market: Market, midpoint: float) -> tuple[float, float]:
     """
     Compute bid and ask prices around the midpoint.
-    Returns (bid_price, ask_price).
+    Returns (bid_price, ask_price), clamped to [0.001, 0.999].
     """
     half_spread = market.max_incentive_spread * config.SPREAD_PCT
     bid = midpoint - half_spread
     ask = midpoint + half_spread
 
-    bid = _clamp(_round_to_tick(bid, market.tick_size))
-    ask = _clamp(_round_to_tick(ask, market.tick_size))
+    bid = _clamp(_round_to_tick(bid, market.tick_size), 0.001, 0.999)
+    ask = _clamp(_round_to_tick(ask, market.tick_size), 0.001, 0.999)
 
     # Ensure bid < ask
     if bid >= ask:
         tick = float(market.tick_size)
-        bid = _clamp(midpoint - tick, 0.01, 0.99)
-        ask = _clamp(midpoint + tick, 0.01, 0.99)
+        bid = _clamp(midpoint - tick, 0.001, 0.999)
+        ask = _clamp(midpoint + tick, 0.001, 0.999)
 
     return bid, ask
 
 
-def compute_size(price: float, market: Market) -> float:
-    """Compute order size in shares from dollar amount."""
-    shares = config.ORDER_SIZE_USD / price
-    return round(shares, 2)
+TEST_SIZE_OVERRIDE = None  # Set to None to use min_incentive_size. Set to any integer to use that as order size
+
+
+def compute_size(market: Market) -> float:
+    """Return the minimum incentive size (always 100 shares for now)."""
+    if TEST_SIZE_OVERRIDE is not None:
+        return float(TEST_SIZE_OVERRIDE)
+    return market.min_incentive_size
 
 
 def place_quotes(client: ClobClient, market: Market) -> QuotedMarket | None:
@@ -79,18 +83,7 @@ def place_quotes(client: ClobClient, market: Market) -> QuotedMarket | None:
         return None
 
     bid_price, ask_price = compute_quotes(market, mid)
-    bid_size = compute_size(bid_price, market)
-    ask_size = compute_size(ask_price, market)
-
-    # Check minimum incentive size
-    if market.min_incentive_size > 0:
-        if bid_size < market.min_incentive_size:
-            log.warning("%s: bid size %.1f < min_incentive_size %.1f (need $%.0f per side)",
-                        market.ticker, bid_size, market.min_incentive_size,
-                        market.min_incentive_size * bid_price)
-        if ask_size < market.min_incentive_size:
-            log.warning("%s: ask size %.1f < min_incentive_size %.1f",
-                        market.ticker, ask_size, market.min_incentive_size)
+    size = compute_size(market)
 
     quoted = QuotedMarket(market=market, mid_at_placement=mid)
 
@@ -100,33 +93,34 @@ def place_quotes(client: ClobClient, market: Market) -> QuotedMarket | None:
             OrderArgs(
                 token_id=market.yes_token_id,
                 price=bid_price,
-                size=bid_size,
+                size=size,
                 side=SIDE_BUY,
             )
         )
         resp = client.post_order(bid_order, orderType=OrderType.GTC)
         quoted.bid_order_id = resp.get("orderID") or resp.get("id")
         log.info("%s BUY  %.2f @ $%.3f -> order %s",
-                 market.ticker, bid_size, bid_price, quoted.bid_order_id)
+                 market.ticker, size, bid_price, quoted.bid_order_id)
     except Exception as e:
         log.error("%s BUY order failed: %s", market.ticker, e)
 
-    # Place SELL order
+    # Place ask side: BUY NO at (1 - ask_price), equivalent to SELL YES at ask_price
+    no_price = _round_to_tick(1.0 - ask_price, market.tick_size)
     try:
         ask_order = client.create_order(
             OrderArgs(
-                token_id=market.yes_token_id,
-                price=ask_price,
-                size=ask_size,
-                side=SIDE_SELL,
+                token_id=market.no_token_id,
+                price=no_price,
+                size=size,
+                side=SIDE_BUY,
             )
         )
         resp = client.post_order(ask_order, orderType=OrderType.GTC)
         quoted.ask_order_id = resp.get("orderID") or resp.get("id")
-        log.info("%s SELL %.2f @ $%.3f -> order %s",
-                 market.ticker, ask_size, ask_price, quoted.ask_order_id)
+        log.info("%s BUY NO %.2f @ $%.3f (= SELL YES @ $%.3f) -> order %s",
+                 market.ticker, size, no_price, ask_price, quoted.ask_order_id)
     except Exception as e:
-        log.error("%s SELL order failed: %s", market.ticker, e)
+        log.error("%s BUY NO order failed: %s", market.ticker, e)
 
     return quoted
 
@@ -136,10 +130,10 @@ def should_refresh(client: ClobClient, quoted: QuotedMarket) -> bool:
     mid = get_midpoint(client, quoted.market.yes_token_id)
     if mid is None:
         return False
-    drift = abs(mid - quoted.mid_at_placement)
-    if drift > config.REFRESH_THRESHOLD:
-        log.info("%s midpoint drifted %.4f (%.3f -> %.3f), refreshing",
-                 quoted.market.ticker, drift, quoted.mid_at_placement, mid)
+    drift_pct = abs(mid - quoted.mid_at_placement) / quoted.mid_at_placement
+    log.info("%s | open: %.4f | now: %.4f | drift: %.1f%%",
+             quoted.market.ticker, quoted.mid_at_placement, mid, drift_pct * 100)
+    if drift_pct > config.REFRESH_THRESHOLD_PCT:
         return True
     return False
 

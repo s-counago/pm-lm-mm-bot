@@ -22,12 +22,17 @@ def build_client() -> ClobClient:
             api_passphrase=config.CLOB_PASSPHRASE,
         )
 
+    funder = config.FUNDER_ADDRESS or None
+    # Use POLY_GNOSIS_SAFE (2) signature type when a funder/proxy wallet is set
+    sig_type = 2 if funder else 0
+
     client = ClobClient(
         host=CLOB_HOST,
         chain_id=CHAIN_ID,
         key=config.PRIVATE_KEY,
         creds=creds,
-        funder=config.FUNDER_ADDRESS or None,
+        signature_type=sig_type,
+        funder=funder,
     )
 
     if creds is None:

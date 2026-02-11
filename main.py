@@ -41,6 +41,8 @@ def main():
         format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
         datefmt="%H:%M:%S",
     )
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
 
     # 1. Initialize client
     log.info("Initializing CLOB client...")
@@ -105,6 +107,7 @@ def main():
             break
 
         # Check each market for drift
+        print()
         for i, qm in enumerate(quoted_markets):
             try:
                 if should_refresh(client, qm):
