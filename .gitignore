@@ -1,5 +1,4 @@
 .env
-.env.example
 TODOs.txt
 __pycache__/
 *.pyc
