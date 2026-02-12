@@ -3,3 +3,4 @@
   2. .venv/bin/python3 client.py --derive-keys → paste creds into .env
   3. .venv/bin/python3 discovery.py → dry-run to see what markets are found
   4. .venv/bin/python3 main.py → run the bot
+  5. .venv/bin/python3 inventory.py to dump inventory

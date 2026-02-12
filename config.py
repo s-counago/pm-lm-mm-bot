@@ -34,3 +34,7 @@ POLL_INTERVAL_SECONDS = 0.2
 
 # Cancel all orders before NASDAQ close (ET timezone, 24h format "HH:MM")
 SHUTDOWN_TIME = "15:50"
+
+# --- Inventory dumper ---
+INVENTORY_POLL_SECONDS = 0.5       # how often to check positions
+INVENTORY_MIN_SHARES = 1.0         # ignore dust below this
