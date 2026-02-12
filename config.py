@@ -15,14 +15,14 @@ CLOB_HOST = "https://clob.polymarket.com"
 CHAIN_ID = 137  # Polygon mainnet
 
 # --- Tickers to quote ---
-TICKERS = ["SPX", "GOOGL", "MSFT"]  # auto-builds daily equity "Up or Down" slugs
+TICKERS = []  # auto-builds daily equity "Up or Down" slugs
 
 # --- Explicit market slugs ---
 # Each entry: {"slug": "event-slug"} for all incentivized outcomes,
 # or {"slug": "event-slug", "outcome": "Norway"} for a specific outcome.
 MARKETS: list[dict] = [
     #{"slug": "spx-opens-up-or-down-on-february-12-2026"},
-    #{"slug": "bangladesh-parliamentary-election-winner-154"}
+    {"slug": "what-price-will-msft-hit-in-february-2026", "outcome": "↓ $390"}
 ]
 
 # --- Quoting parameters ---
@@ -42,9 +42,6 @@ REFRESH_THRESHOLD_PCT = 0.005
 # --- Timing ---
 # How often to check midpoint for drift (seconds)
 POLL_INTERVAL_SECONDS = 0.2
-
-# Cancel all orders before NASDAQ close (ET timezone, 24h format "HH:MM")
-SHUTDOWN_TIME = "15:50"
 
 # --- Inventory dumper ---
 INVENTORY_POLL_SECONDS = 0.5       # how often to check positions

@@ -47,6 +47,14 @@ def build_client() -> ClobClient:
         log.info("  CLOB_SECRET=%s", creds.api_secret)
         log.info("  CLOB_PASSPHRASE=%s", creds.api_passphrase)
 
+    # Refresh CLOB-cached USDC allowance
+    try:
+        client.update_balance_allowance(
+            BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
+        )
+    except Exception as e:
+        log.warning("update_balance_allowance(COLLATERAL) failed: %s", e)
+
     return client
 
 
@@ -62,6 +70,18 @@ def get_usdc_balance(client: ClobClient) -> float:
     except Exception as e:
         log.warning("Could not fetch USDC balance: %s", e)
         return 0.0
+
+
+def refresh_allowances(client: ClobClient, token_ids: list[str]) -> None:
+    """Refresh CLOB-cached allowances for all conditional token IDs."""
+    for token_id in token_ids:
+        try:
+            client.update_balance_allowance(
+                BalanceAllowanceParams(asset_type=AssetType.CONDITIONAL, token_id=token_id)
+            )
+        except Exception as e:
+            log.warning("update_balance_allowance(token %s…) failed: %s", token_id[:16], e)
+    log.info("Refreshed allowances for %d conditional tokens", len(token_ids))
 
 
 if __name__ == "__main__":

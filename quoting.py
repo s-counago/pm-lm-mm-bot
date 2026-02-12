@@ -211,13 +211,13 @@ def process_market_cycle(
         # Place exit orders if needed
         if yes_bal >= config.INVENTORY_MIN_SHARES and qm.yes_exit_order_id is None:
             shares = math.floor(yes_bal * 100) / 100
-            _, ask_price = compute_quotes(market, mid)
-            log.info("EXIT %s SELL YES %.2f @ $%.3f", market.ticker, shares, ask_price)
+            exit_price = _clamp(_round_to_tick(mid, market.tick_size), 0.001, 0.999)
+            log.info("EXIT %s SELL YES %.2f @ $%.3f (mid)", market.ticker, shares, exit_price)
             try:
                 order = client.create_order(
                     OrderArgs(
                         token_id=market.yes_token_id,
-                        price=ask_price,
+                        price=exit_price,
                         size=shares,
                         side=SIDE_SELL,
                     )
@@ -230,15 +230,14 @@ def process_market_cycle(
 
         if no_bal >= config.INVENTORY_MIN_SHARES and qm.no_exit_order_id is None:
             shares = math.floor(no_bal * 100) / 100
-            bid_price, _ = compute_quotes(market, mid)
-            sell_no_price = _round_to_tick(1.0 - bid_price, market.tick_size)
-            log.info("EXIT %s SELL NO %.2f @ $%.3f (= BUY YES @ $%.3f)",
-                     market.ticker, shares, sell_no_price, bid_price)
+            exit_price = _clamp(_round_to_tick(1.0 - mid, market.tick_size), 0.001, 0.999)
+            log.info("EXIT %s SELL NO %.2f @ $%.3f (= BUY YES @ mid $%.3f)",
+                     market.ticker, shares, exit_price, mid)
             try:
                 order = client.create_order(
                     OrderArgs(
                         token_id=market.no_token_id,
-                        price=sell_no_price,
+                        price=exit_price,
                         size=shares,
                         side=SIDE_SELL,
                     )

@@ -9,11 +9,9 @@ import logging
 import signal
 import sys
 import time
-from datetime import datetime
-from zoneinfo import ZoneInfo
 
 import config
-from client import build_client, get_usdc_balance
+from client import build_client, get_usdc_balance, refresh_allowances
 from discovery import discover_markets
 from quoting import (
     QuotedMarket,
@@ -24,23 +22,21 @@ from quoting import (
 )
 
 log = logging.getLogger(__name__)
-ET = ZoneInfo("America/New_York")
-
-
-def past_shutdown_time() -> bool:
-    """Check if current ET time is past the configured shutdown time."""
-    now_et = datetime.now(ET)
-    h, m = config.SHUTDOWN_TIME.split(":")
-    shutdown = now_et.replace(hour=int(h), minute=int(m), second=0, microsecond=0)
-    return now_et >= shutdown
 
 
 def main():
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
-        datefmt="%H:%M:%S",
-    )
+    fmt = logging.Formatter("%(asctime)s %(levelname)s [%(name)s] %(message)s",
+                            datefmt="%H:%M:%S")
+    root = logging.getLogger()
+    root.setLevel(logging.INFO)
+
+    console = logging.StreamHandler()
+    console.setFormatter(fmt)
+    root.addHandler(console)
+
+    logfile = logging.FileHandler("mm.log")
+    logfile.setFormatter(fmt)
+    root.addHandler(logfile)
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("httpcore").setLevel(logging.WARNING)
 
@@ -62,6 +58,12 @@ def main():
         log.error("No markets found. Exiting.")
         sys.exit(1)
     log.info("Found %d markets", len(markets))
+
+    # Refresh CLOB-cached allowances for all discovered tokens
+    all_token_ids = []
+    for m in markets:
+        all_token_ids.extend([m.yes_token_id, m.no_token_id])
+    refresh_allowances(client, all_token_ids)
 
     # Capital check
     total_needed = len(markets) * config.ORDER_SIZE_USD * 2
@@ -98,13 +100,6 @@ def main():
     # 5. Monitor loop
     while True:
         time.sleep(config.POLL_INTERVAL_SECONDS)
-
-        # Check shutdown time
-        if past_shutdown_time():
-            log.info("Past shutdown time (%s ET), cancelling all orders...", config.SHUTDOWN_TIME)
-            cancel_all_quoted(client, quoted_markets)
-            log.info("Shutdown complete.")
-            break
 
         # Parallel fetch all balances + midpoints
         print()

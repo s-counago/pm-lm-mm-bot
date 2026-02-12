@@ -35,14 +35,13 @@ _last_sold: dict[str, float] = {}
 
 
 def get_token_balance(client: ClobClient, token_id: str) -> float:
-    """Get the sellable conditional token balance (min of balance, allowance)."""
+    """Get the conditional token balance (in shares) for a given token."""
     resp = client.get_balance_allowance(
         BalanceAllowanceParams(asset_type=AssetType.CONDITIONAL, token_id=token_id)
     )
     balance = float(resp.get("balance", 0))
-    allowance = float(resp.get("allowance", 0))
     # Conditional tokens use the same 6-decimal raw encoding as USDC
-    return min(balance, allowance) / 1e6
+    return balance / 1e6
 
 
 def dump_position(client: ClobClient, token_id: str, shares: float, label: str) -> bool:

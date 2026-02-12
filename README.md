@@ -16,3 +16,11 @@ Inventory risk management:
    the price down toward mid, then eventually market-sell as a last resort.
   6. Stale inventory dump — If a position has been held beyond some threshold (say 30s or 60s), just market-sell and cut the loss. Treats the market order as a
   stop-loss rather than the default exit.
+
+
+No midprice bug btw
+
+add stop loss/take profit system
+test if quoting while exiting positions work
+
+how does polymarket fill orders? are they a queue? does refreshing the orders make it less likely to get them filled?
