@@ -65,13 +65,10 @@ def compute_quotes(market: Market, midpoint: float) -> tuple[float, float]:
     return bid, ask
 
 
-TEST_SIZE_OVERRIDE = None  # Set to None to use min_incentive_size. Set to any integer to use that as order size
-
-
 def compute_size(market: Market) -> float:
-    """Return the minimum incentive size (always 100 shares for now)."""
-    if TEST_SIZE_OVERRIDE is not None:
-        return float(TEST_SIZE_OVERRIDE)
+    """Return the minimum incentive size, or TEST_SIZE_OVERRIDE if set."""
+    if config.TEST_SIZE_OVERRIDE is not None:
+        return float(config.TEST_SIZE_OVERRIDE)
     return market.min_incentive_size
 
 

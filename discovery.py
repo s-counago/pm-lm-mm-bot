@@ -16,7 +16,7 @@ ET = ZoneInfo("America/New_York")
 
 @dataclass
 class Market:
-    ticker: str                 # e.g. "AAPL"
+    ticker: str                 # e.g. "AAPL" or "Norway" (groupItemTitle)
     question: str               # full event question
     condition_id: str
     yes_token_id: str
@@ -39,30 +39,71 @@ def _build_slug(ticker: str) -> str:
     return f"{ticker.lower()}-up-or-down-on-{month}-{day}-{year}"
 
 
-def discover_markets(tickers: list[str] | None = None) -> list[Market]:
-    """
-    Find today's daily equity "Up or Down" markets via the Gamma API slug endpoint.
-    Returns a Market for each configured ticker that has a live market today.
-    """
-    if tickers is None:
-        tickers = config.TICKERS
+def _parse_market(mkt: dict, label: str, question: str) -> Market | None:
+    """Parse a single Gamma API market dict into a Market dataclass."""
+    condition_id = mkt.get("conditionId", "")
 
+    clob_token_ids = mkt.get("clobTokenIds")
+    if not clob_token_ids:
+        log.warning("No clobTokenIds for %s", label)
+        return None
+
+    if isinstance(clob_token_ids, str):
+        try:
+            clob_token_ids = json.loads(clob_token_ids)
+        except json.JSONDecodeError:
+            log.warning("Could not parse clobTokenIds for %s: %s", label, clob_token_ids)
+            return None
+
+    if len(clob_token_ids) < 2:
+        log.warning("Expected 2 token IDs for %s, got %d", label, len(clob_token_ids))
+        return None
+
+    max_spread_cents = float(mkt.get("rewardsMaxSpread", 0) or 0)
+    max_spread = max_spread_cents / 100.0
+    min_size = float(mkt.get("rewardsMinSize", 0) or 0)
+    tick_size = str(mkt.get("orderPriceMinTickSize", "0.01") or "0.01")
+
+    return Market(
+        ticker=label,
+        question=question,
+        condition_id=condition_id,
+        yes_token_id=clob_token_ids[0],
+        no_token_id=clob_token_ids[1],
+        max_incentive_spread=max_spread,
+        min_incentive_size=min_size,
+        tick_size=tick_size,
+    )
+
+
+def _fetch_event(slug: str) -> dict | None:
+    """Fetch event from Gamma API by slug. Returns event dict or None."""
+    url = f"{GAMMA_API}/events/slug/{slug}"
+    log.info("Fetching %s", url)
+    try:
+        resp = requests.get(url, timeout=15)
+        if resp.status_code == 404:
+            log.warning("No event found for slug: %s", slug)
+            return None
+        resp.raise_for_status()
+        return resp.json()
+    except Exception as e:
+        log.error("Gamma API request failed for slug %s: %s", slug, e)
+        return None
+
+
+def discover_markets() -> list[Market]:
+    """
+    Discover markets from both TICKERS (daily equity) and MARKETS (explicit slugs).
+    Returns a Market for each live market found.
+    """
     markets: list[Market] = []
 
-    for ticker in tickers:
+    # --- Daily equity tickers ---
+    for ticker in config.TICKERS:
         slug = _build_slug(ticker)
-        url = f"{GAMMA_API}/events/slug/{slug}"
-        log.info("Fetching %s", url)
-
-        try:
-            resp = requests.get(url, timeout=15)
-            if resp.status_code == 404:
-                log.warning("No event found for %s (slug: %s)", ticker, slug)
-                continue
-            resp.raise_for_status()
-            event = resp.json()
-        except Exception as e:
-            log.error("Gamma API request failed for %s: %s", ticker, e)
+        event = _fetch_event(slug)
+        if not event:
             continue
 
         event_markets = event.get("markets", [])
@@ -70,49 +111,54 @@ def discover_markets(tickers: list[str] | None = None) -> list[Market]:
             log.warning("Event '%s' has no markets", event.get("title"))
             continue
 
-        mkt = event_markets[0]
-        condition_id = mkt.get("conditionId", "")
+        m = _parse_market(event_markets[0], ticker, event.get("title", ""))
+        if m:
+            markets.append(m)
+            log.info("Found: %s | spread=%.3f | min_size=%.0f | tick=%s",
+                     m.question, m.max_incentive_spread, m.min_incentive_size, m.tick_size)
 
-        # Token IDs: clobTokenIds is a JSON string like '["yes_id", "no_id"]'
-        clob_token_ids = mkt.get("clobTokenIds")
-        if not clob_token_ids:
-            log.warning("No clobTokenIds for %s", ticker)
+    # --- Explicit market slugs ---
+    for entry in config.MARKETS:
+        slug = entry["slug"]
+        outcome = entry.get("outcome")
+
+        event = _fetch_event(slug)
+        if not event:
             continue
 
-        if isinstance(clob_token_ids, str):
-            try:
-                clob_token_ids = json.loads(clob_token_ids)
-            except json.JSONDecodeError:
-                log.warning("Could not parse clobTokenIds for %s: %s", ticker, clob_token_ids)
+        event_markets = event.get("markets", [])
+        if not event_markets:
+            log.warning("Event '%s' has no markets", event.get("title"))
+            continue
+
+        question = event.get("title", "")
+
+        if outcome:
+            # Filter to the specific outcome
+            matched = [m for m in event_markets if m.get("groupItemTitle") == outcome]
+            if not matched:
+                log.warning("Outcome '%s' not found in event '%s'", outcome, question)
+                continue
+            candidates = matched
+        elif len(event_markets) == 1:
+            # Single market (binary event)
+            candidates = event_markets
+        else:
+            # Multiple markets — only keep incentivized ones
+            candidates = [m for m in event_markets
+                          if float(m.get("rewardsMaxSpread", 0) or 0) > 0]
+            if not candidates:
+                log.warning("No incentivized markets in event '%s'", question)
                 continue
 
-        if len(clob_token_ids) < 2:
-            log.warning("Expected 2 token IDs for %s, got %d", ticker, len(clob_token_ids))
-            continue
-
-        yes_token_id = clob_token_ids[0]
-        no_token_id = clob_token_ids[1]
-
-        # Reward parameters — top-level market fields, spread is in cents
-        max_spread_cents = float(mkt.get("rewardsMaxSpread", 0) or 0)
-        max_spread = max_spread_cents / 100.0  # convert cents → price units
-        min_size = float(mkt.get("rewardsMinSize", 0) or 0)
-
-        tick_size = str(mkt.get("orderPriceMinTickSize", "0.01") or "0.01")
-
-        market = Market(
-            ticker=ticker,
-            question=event.get("title", ""),
-            condition_id=condition_id,
-            yes_token_id=yes_token_id,
-            no_token_id=no_token_id,
-            max_incentive_spread=max_spread,
-            min_incentive_size=min_size,
-            tick_size=tick_size,
-        )
-        markets.append(market)
-        log.info("Found: %s | spread=%.3f | min_size=%.0f | tick=%s",
-                 market.question, max_spread, min_size, tick_size)
+        for mkt in candidates:
+            label = mkt.get("groupItemTitle") or slug
+            m = _parse_market(mkt, label, question)
+            if m:
+                markets.append(m)
+                log.info("Found: %s [%s] | spread=%.3f | min_size=%.0f | tick=%s",
+                         m.question, m.ticker, m.max_incentive_spread,
+                         m.min_incentive_size, m.tick_size)
 
     return markets
 

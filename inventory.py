@@ -113,7 +113,7 @@ def main():
     client = build_client()
 
     # 2. Discover markets
-    log.info("Discovering markets for tickers: %s", config.TICKERS)
+    log.info("Discovering markets for tickers=%s, markets=%s", config.TICKERS, config.MARKETS)
     markets = discover_markets()
     if not markets:
         log.error("No markets found. Exiting.")

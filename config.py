@@ -15,7 +15,15 @@ CLOB_HOST = "https://clob.polymarket.com"
 CHAIN_ID = 137  # Polygon mainnet
 
 # --- Tickers to quote ---
-TICKERS = ["SPX"]
+TICKERS = ["SPX"]  # auto-builds daily equity "Up or Down" slugs
+
+# --- Explicit market slugs ---
+# Each entry: {"slug": "event-slug"} for all incentivized outcomes,
+# or {"slug": "event-slug", "outcome": "Norway"} for a specific outcome.
+MARKETS: list[dict] = [
+    {"slug": "spx-opens-up-or-down-on-february-12-2026"},
+    {"slug": "bangladesh-parliamentary-election-winner-154"}
+]
 
 # --- Quoting parameters ---
 # How much of max_incentive_spread to use (0.8 = 80% of allowed spread from mid)
@@ -24,6 +32,9 @@ SPREAD_PCT = 0.6
 
 # Dollar amount per side per market
 ORDER_SIZE_USD = 15.0
+
+# Override order size for testing. Set to None to use min_incentive_size.
+TEST_SIZE_OVERRIDE = None
 
 # Midpoint drift as a percentage before cancel+re-place (e.g. 0.10 = 10%)
 REFRESH_THRESHOLD_PCT = 0.005
