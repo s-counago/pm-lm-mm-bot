@@ -11,6 +11,7 @@ import math
 import signal
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from py_clob_client.client import ClobClient
 from py_clob_client.clob_types import (
@@ -72,31 +73,40 @@ def dump_position(client: ClobClient, token_id: str, shares: float, label: str) 
 
 
 def check_and_dump(client: ClobClient, markets: list[Market]) -> None:
-    """Check all token positions and dump any above the minimum threshold."""
+    """Check all token positions in parallel and dump any above the threshold."""
+    # 1. Collect tokens to check (skip cooldowns)
+    to_check: list[tuple[str, str]] = []
     for market in markets:
         for side, token_id in [("YES", market.yes_token_id), ("NO", market.no_token_id)]:
-            label = f"{market.ticker}/{side}"
-
-            # Skip if we recently sold this token (balance may be stale)
-            last = _last_sold.get(token_id, 0)
-            if time.time() - last < COOLDOWN_SECONDS:
+            if time.time() - _last_sold.get(token_id, 0) < COOLDOWN_SECONDS:
                 continue
+            to_check.append((f"{market.ticker}/{side}", token_id))
 
+    if not to_check:
+        return
+
+    # 2. Parallel balance fetch
+    balances: dict[tuple[str, str], float] = {}
+    with ThreadPoolExecutor(max_workers=len(to_check)) as pool:
+        futures = {
+            pool.submit(get_token_balance, client, token_id): (label, token_id)
+            for label, token_id in to_check
+        }
+        for future in as_completed(futures):
+            label, token_id = futures[future]
             try:
-                balance = get_token_balance(client, token_id)
+                balances[(label, token_id)] = future.result()
             except Exception as e:
                 log.error("%s balance check failed: %s", label, e)
-                continue
 
-            if balance < config.INVENTORY_MIN_SHARES:
-                log.debug("%s balance=%.4f (below threshold)", label, balance)
-                continue
-
-            # Truncate to 2 decimals to avoid rounding up past actual balance
-            shares = math.floor(balance * 100) / 100
-            log.info("%s balance=%.4f — dumping %.2f", label, balance, shares)
-            if dump_position(client, token_id, shares, label):
-                _last_sold[token_id] = time.time()
+    # 3. Dump any positions found
+    for (label, token_id), balance in balances.items():
+        if balance < config.INVENTORY_MIN_SHARES:
+            continue
+        shares = math.floor(balance * 100) / 100
+        log.info("%s balance=%.4f — dumping %.2f", label, balance, shares)
+        if dump_position(client, token_id, shares, label):
+            _last_sold[token_id] = time.time()
 
 
 def main():

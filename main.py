@@ -18,6 +18,8 @@ from discovery import discover_markets
 from quoting import (
     QuotedMarket,
     cancel_all_quoted,
+    check_and_place_exits,
+    fetch_market_data,
     place_quotes,
     refresh_quotes,
     should_refresh,
@@ -106,11 +108,20 @@ def main():
             log.info("Shutdown complete.")
             break
 
-        # Check each market for drift
+        # Parallel fetch all balances + midpoints
         print()
-        for i, qm in enumerate(quoted_markets):
+        market_data = fetch_market_data(client, quoted_markets)
+
+        for i, (qm, (yes_bal, no_bal, mid)) in enumerate(
+            zip(quoted_markets, market_data)
+        ):
             try:
-                if should_refresh(client, qm):
+                qm = check_and_place_exits(client, qm, yes_bal, no_bal, mid)
+                quoted_markets[i] = qm
+            except Exception as e:
+                log.error("Error checking exits for %s: %s", qm.market.ticker, e)
+            try:
+                if mid is not None and should_refresh(qm, mid):
                     new_qm = refresh_quotes(client, qm)
                     if new_qm:
                         quoted_markets[i] = new_qm

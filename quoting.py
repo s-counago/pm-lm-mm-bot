@@ -1,4 +1,6 @@
 import logging
+import math
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
 from py_clob_client.client import ClobClient
@@ -6,6 +8,7 @@ from py_clob_client.clob_types import OrderArgs, OrderType
 
 import config
 from discovery import Market
+from inventory import get_token_balance
 
 log = logging.getLogger(__name__)
 
@@ -18,6 +21,8 @@ class QuotedMarket:
     market: Market
     bid_order_id: str | None = None
     ask_order_id: str | None = None
+    yes_exit_order_id: str | None = None
+    no_exit_order_id: str | None = None
     mid_at_placement: float = 0.0
 
 
@@ -122,49 +127,159 @@ def place_quotes(client: ClobClient, market: Market) -> QuotedMarket | None:
     return quoted
 
 
-def should_refresh(client: ClobClient, quoted: QuotedMarket) -> bool:
-    """Check if midpoint has drifted beyond threshold."""
-    mid = get_midpoint(client, quoted.market.yes_token_id)
-    if mid is None:
-        return False
+def fetch_market_data(
+    client: ClobClient,
+    quoted_markets: list[QuotedMarket],
+) -> list[tuple[float, float, float | None]]:
+    """Fetch all balances + midpoints in parallel across all markets.
+
+    Returns a list of (yes_bal, no_bal, mid) tuples, one per market.
+    """
+    # Build (index, callable) work items
+    results: dict[int, dict[str, float | None]] = {
+        i: {"yes_bal": 0.0, "no_bal": 0.0, "mid": None}
+        for i in range(len(quoted_markets))
+    }
+    work: list[tuple[int, str, callable]] = []
+    for i, qm in enumerate(quoted_markets):
+        m = qm.market
+        if qm.yes_exit_order_id is None:
+            work.append((i, "yes_bal", lambda c=client, t=m.yes_token_id: get_token_balance(c, t)))
+        if qm.no_exit_order_id is None:
+            work.append((i, "no_bal", lambda c=client, t=m.no_token_id: get_token_balance(c, t)))
+        work.append((i, "mid", lambda c=client, t=m.yes_token_id: get_midpoint(c, t)))
+
+    with ThreadPoolExecutor(max_workers=min(len(work), 3)) as pool:
+        futures = {pool.submit(fn): (idx, key) for idx, key, fn in work}
+        for future in futures:
+            idx, key = futures[future]
+            try:
+                results[idx][key] = future.result()
+            except Exception as e:
+                ticker = quoted_markets[idx].market.ticker
+                log.error("%s fetch %s failed: %s", ticker, key, e)
+
+    return [(r["yes_bal"], r["no_bal"], r["mid"]) for r in results.values()]
+
+
+def check_and_place_exits(
+    client: ClobClient,
+    qm: QuotedMarket,
+    yes_bal: float,
+    no_bal: float,
+    mid: float | None,
+) -> QuotedMarket:
+    """Place SELL limit orders for filled positions using pre-fetched data."""
+    market = qm.market
+
+    # YES fill → SELL YES at ask
+    if qm.yes_exit_order_id is None and yes_bal >= config.INVENTORY_MIN_SHARES:
+        shares = math.floor(yes_bal * 100) / 100
+        log.info("FILL %s YES | balance=%.2f shares", market.ticker, yes_bal)
+        if mid is not None:
+            _, ask_price = compute_quotes(market, mid)
+            log.info("EXIT %s SELL YES %.2f @ $%.3f", market.ticker, shares, ask_price)
+            try:
+                order = client.create_order(
+                    OrderArgs(
+                        token_id=market.yes_token_id,
+                        price=ask_price,
+                        size=shares,
+                        side=SIDE_SELL,
+                    )
+                )
+                resp = client.post_order(order, orderType=OrderType.GTC)
+                qm.yes_exit_order_id = resp.get("orderID") or resp.get("id")
+                log.info("EXIT %s SELL YES placed -> %s", market.ticker, qm.yes_exit_order_id)
+            except Exception as e:
+                log.error("EXIT %s SELL YES failed: %s", market.ticker, e)
+
+    # NO fill → SELL NO at (1 - bid)
+    if qm.no_exit_order_id is None and no_bal >= config.INVENTORY_MIN_SHARES:
+        shares = math.floor(no_bal * 100) / 100
+        log.info("FILL %s NO  | balance=%.2f shares", market.ticker, no_bal)
+        if mid is not None:
+            bid_price, _ = compute_quotes(market, mid)
+            sell_no_price = _round_to_tick(1.0 - bid_price, market.tick_size)
+            log.info("EXIT %s SELL NO  %.2f @ $%.3f (= BUY YES @ $%.3f)",
+                     market.ticker, shares, sell_no_price, bid_price)
+            try:
+                order = client.create_order(
+                    OrderArgs(
+                        token_id=market.no_token_id,
+                        price=sell_no_price,
+                        size=shares,
+                        side=SIDE_SELL,
+                    )
+                )
+                resp = client.post_order(order, orderType=OrderType.GTC)
+                qm.no_exit_order_id = resp.get("orderID") or resp.get("id")
+                log.info("EXIT %s SELL NO  placed -> %s", market.ticker, qm.no_exit_order_id)
+            except Exception as e:
+                log.error("EXIT %s SELL NO  failed: %s", market.ticker, e)
+
+    return qm
+
+
+def should_refresh(quoted: QuotedMarket, mid: float) -> bool:
+    """Check if midpoint has drifted beyond threshold (using pre-fetched mid)."""
     drift_pct = abs(mid - quoted.mid_at_placement) / quoted.mid_at_placement
     log.info("%s | open: %.4f | now: %.4f | drift: %.1f%%",
              quoted.market.ticker, quoted.mid_at_placement, mid, drift_pct * 100)
-    if drift_pct > config.REFRESH_THRESHOLD_PCT:
-        return True
-    return False
+    return drift_pct > config.REFRESH_THRESHOLD_PCT
 
 
 def cancel_quoted(client: ClobClient, quoted: QuotedMarket) -> None:
-    """Cancel both orders for a quoted market."""
-    order_ids = [oid for oid in (quoted.bid_order_id, quoted.ask_order_id) if oid]
+    """Cancel all orders (quotes + exits) for a quoted market."""
+    order_ids = [oid for oid in (
+        quoted.bid_order_id, quoted.ask_order_id,
+        quoted.yes_exit_order_id, quoted.no_exit_order_id,
+    ) if oid]
     if not order_ids:
         return
+
     try:
         client.cancel_orders(order_ids)
-        log.info("%s cancelled %d orders", quoted.market.ticker, len(order_ids))
+        parts = []
+        if quoted.bid_order_id or quoted.ask_order_id:
+            parts.append("quotes")
+        if quoted.yes_exit_order_id:
+            parts.append("YES exit")
+        if quoted.no_exit_order_id:
+            parts.append("NO exit")
+        log.info("%s cancelled %d orders (%s)", quoted.market.ticker, len(order_ids), " + ".join(parts))
     except Exception as e:
         log.error("%s cancel failed: %s", quoted.market.ticker, e)
     quoted.bid_order_id = None
     quoted.ask_order_id = None
+    quoted.yes_exit_order_id = None
+    quoted.no_exit_order_id = None
 
 
 def refresh_quotes(client: ClobClient, quoted: QuotedMarket) -> QuotedMarket | None:
     """Cancel existing orders and re-place at current midpoint."""
+    had_yes_exit = quoted.yes_exit_order_id is not None
+    had_no_exit = quoted.no_exit_order_id is not None
     cancel_quoted(client, quoted)
+    if had_yes_exit or had_no_exit:
+        sides = [s for s, had in [("YES", had_yes_exit), ("NO", had_no_exit)] if had]
+        log.info("%s exit orders cancelled (%s) — will re-place at new mid next cycle",
+                 quoted.market.ticker, " + ".join(sides))
     return place_quotes(client, quoted.market)
 
 
 def cancel_all_quoted(client: ClobClient, quoted_markets: list[QuotedMarket]) -> None:
-    """Cancel all orders across all managed markets."""
+    """Cancel all orders (quotes + exits) across all managed markets."""
     all_ids = []
     for qm in quoted_markets:
-        if qm.bid_order_id:
-            all_ids.append(qm.bid_order_id)
-        if qm.ask_order_id:
-            all_ids.append(qm.ask_order_id)
+        for oid in (qm.bid_order_id, qm.ask_order_id,
+                    qm.yes_exit_order_id, qm.no_exit_order_id):
+            if oid:
+                all_ids.append(oid)
         qm.bid_order_id = None
         qm.ask_order_id = None
+        qm.yes_exit_order_id = None
+        qm.no_exit_order_id = None
 
     if not all_ids:
         log.info("No orders to cancel")
