@@ -15,14 +15,14 @@ CLOB_HOST = "https://clob.polymarket.com"
 CHAIN_ID = 137  # Polygon mainnet
 
 # --- Tickers to quote ---
-TICKERS = ["SPX"]  # auto-builds daily equity "Up or Down" slugs
+TICKERS = ["SPX", "GOOGL", "MSFT"]  # auto-builds daily equity "Up or Down" slugs
 
 # --- Explicit market slugs ---
 # Each entry: {"slug": "event-slug"} for all incentivized outcomes,
 # or {"slug": "event-slug", "outcome": "Norway"} for a specific outcome.
 MARKETS: list[dict] = [
-    {"slug": "spx-opens-up-or-down-on-february-12-2026"},
-    {"slug": "bangladesh-parliamentary-election-winner-154"}
+    #{"slug": "spx-opens-up-or-down-on-february-12-2026"},
+    #{"slug": "bangladesh-parliamentary-election-winner-154"}
 ]
 
 # --- Quoting parameters ---

@@ -18,11 +18,9 @@ from discovery import discover_markets
 from quoting import (
     QuotedMarket,
     cancel_all_quoted,
-    check_and_place_exits,
     fetch_market_data,
     place_quotes,
-    refresh_quotes,
-    should_refresh,
+    process_market_cycle,
 )
 
 log = logging.getLogger(__name__)
@@ -116,17 +114,9 @@ def main():
             zip(quoted_markets, market_data)
         ):
             try:
-                qm = check_and_place_exits(client, qm, yes_bal, no_bal, mid)
-                quoted_markets[i] = qm
+                quoted_markets[i] = process_market_cycle(client, qm, yes_bal, no_bal, mid)
             except Exception as e:
-                log.error("Error checking exits for %s: %s", qm.market.ticker, e)
-            try:
-                if mid is not None and should_refresh(qm, mid):
-                    new_qm = refresh_quotes(client, qm)
-                    if new_qm:
-                        quoted_markets[i] = new_qm
-            except Exception as e:
-                log.error("Error refreshing %s: %s", qm.market.ticker, e)
+                log.error("Error processing %s: %s", qm.market.ticker, e)
 
 
 if __name__ == "__main__":

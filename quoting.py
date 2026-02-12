@@ -143,10 +143,8 @@ def fetch_market_data(
     work: list[tuple[int, str, callable]] = []
     for i, qm in enumerate(quoted_markets):
         m = qm.market
-        if qm.yes_exit_order_id is None:
-            work.append((i, "yes_bal", lambda c=client, t=m.yes_token_id: get_token_balance(c, t)))
-        if qm.no_exit_order_id is None:
-            work.append((i, "no_bal", lambda c=client, t=m.no_token_id: get_token_balance(c, t)))
+        work.append((i, "yes_bal", lambda c=client, t=m.yes_token_id: get_token_balance(c, t)))
+        work.append((i, "no_bal", lambda c=client, t=m.no_token_id: get_token_balance(c, t)))
         work.append((i, "mid", lambda c=client, t=m.yes_token_id: get_midpoint(c, t)))
 
     with ThreadPoolExecutor(max_workers=min(len(work), 3)) as pool:
@@ -162,21 +160,57 @@ def fetch_market_data(
     return [(r["yes_bal"], r["no_bal"], r["mid"]) for r in results.values()]
 
 
-def check_and_place_exits(
+def process_market_cycle(
     client: ClobClient,
     qm: QuotedMarket,
     yes_bal: float,
     no_bal: float,
     mid: float | None,
 ) -> QuotedMarket:
-    """Place SELL limit orders for filled positions using pre-fetched data."""
+    """Handle the full per-market cycle: QUOTING (no inventory) or EXITING (has inventory)."""
     market = qm.market
+    has_inventory = yes_bal >= config.INVENTORY_MIN_SHARES or no_bal >= config.INVENTORY_MIN_SHARES
 
-    # YES fill → SELL YES at ask
-    if qm.yes_exit_order_id is None and yes_bal >= config.INVENTORY_MIN_SHARES:
-        shares = math.floor(yes_bal * 100) / 100
-        log.info("FILL %s YES | balance=%.2f shares", market.ticker, yes_bal)
-        if mid is not None:
+    if mid is None:
+        log.warning("%s no midpoint, skipping cycle", market.ticker)
+        return qm
+
+    if has_inventory:
+        # --- EXITING mode: cancel quotes, manage exit orders ---
+
+        # Cancel quotes if still open
+        quote_ids = [oid for oid in (qm.bid_order_id, qm.ask_order_id) if oid]
+        if quote_ids:
+            log.info("%s PAUSE quotes, entering exit mode", market.ticker)
+            try:
+                client.cancel_orders(quote_ids)
+                qm.bid_order_id = None
+                qm.ask_order_id = None
+            except Exception as e:
+                log.error("%s cancel quotes failed: %s", market.ticker, e)
+
+        # Check drift on existing exits → cancel for re-placement
+        has_exits = qm.yes_exit_order_id is not None or qm.no_exit_order_id is not None
+        if has_exits:
+            parts = []
+            if yes_bal >= config.INVENTORY_MIN_SHARES:
+                parts.append(f"YES {yes_bal:.2f}")
+            if no_bal >= config.INVENTORY_MIN_SHARES:
+                parts.append(f"NO {no_bal:.2f}")
+            exit_label = "EXIT " + " + ".join(parts) + " "
+            if should_refresh(qm, mid, exit_label):
+                exit_ids = [oid for oid in (qm.yes_exit_order_id, qm.no_exit_order_id) if oid]
+                log.info("%s refreshing exit orders", market.ticker)
+                try:
+                    client.cancel_orders(exit_ids)
+                    qm.yes_exit_order_id = None
+                    qm.no_exit_order_id = None
+                except Exception as e:
+                    log.error("%s cancel exits failed: %s", market.ticker, e)
+
+        # Place exit orders if needed
+        if yes_bal >= config.INVENTORY_MIN_SHARES and qm.yes_exit_order_id is None:
+            shares = math.floor(yes_bal * 100) / 100
             _, ask_price = compute_quotes(market, mid)
             log.info("EXIT %s SELL YES %.2f @ $%.3f", market.ticker, shares, ask_price)
             try:
@@ -190,18 +224,15 @@ def check_and_place_exits(
                 )
                 resp = client.post_order(order, orderType=OrderType.GTC)
                 qm.yes_exit_order_id = resp.get("orderID") or resp.get("id")
-                log.info("EXIT %s SELL YES placed -> %s", market.ticker, qm.yes_exit_order_id)
+                qm.mid_at_placement = mid
             except Exception as e:
                 log.error("EXIT %s SELL YES failed: %s", market.ticker, e)
 
-    # NO fill → SELL NO at (1 - bid)
-    if qm.no_exit_order_id is None and no_bal >= config.INVENTORY_MIN_SHARES:
-        shares = math.floor(no_bal * 100) / 100
-        log.info("FILL %s NO  | balance=%.2f shares", market.ticker, no_bal)
-        if mid is not None:
+        if no_bal >= config.INVENTORY_MIN_SHARES and qm.no_exit_order_id is None:
+            shares = math.floor(no_bal * 100) / 100
             bid_price, _ = compute_quotes(market, mid)
             sell_no_price = _round_to_tick(1.0 - bid_price, market.tick_size)
-            log.info("EXIT %s SELL NO  %.2f @ $%.3f (= BUY YES @ $%.3f)",
+            log.info("EXIT %s SELL NO %.2f @ $%.3f (= BUY YES @ $%.3f)",
                      market.ticker, shares, sell_no_price, bid_price)
             try:
                 order = client.create_order(
@@ -214,18 +245,46 @@ def check_and_place_exits(
                 )
                 resp = client.post_order(order, orderType=OrderType.GTC)
                 qm.no_exit_order_id = resp.get("orderID") or resp.get("id")
-                log.info("EXIT %s SELL NO  placed -> %s", market.ticker, qm.no_exit_order_id)
+                qm.mid_at_placement = mid
             except Exception as e:
-                log.error("EXIT %s SELL NO  failed: %s", market.ticker, e)
+                log.error("EXIT %s SELL NO failed: %s", market.ticker, e)
+
+    else:
+        # --- QUOTING mode: manage quotes, clear stale exits ---
+
+        # Cancel stale exit orders (may not have fully filled) and clear IDs
+        if qm.yes_exit_order_id or qm.no_exit_order_id:
+            exit_ids = [oid for oid in (qm.yes_exit_order_id, qm.no_exit_order_id) if oid]
+            log.info("%s inventory cleared, cancelling exits and resuming quotes", market.ticker)
+            try:
+                client.cancel_orders(exit_ids)
+            except Exception as e:
+                log.error("%s cancel stale exits failed: %s", market.ticker, e)
+            qm.yes_exit_order_id = None
+            qm.no_exit_order_id = None
+
+        # Place quotes if none open (first cycle or just transitioned from EXITING)
+        if qm.bid_order_id is None and qm.ask_order_id is None:
+            new_qm = place_quotes(client, market)
+            if new_qm:
+                return new_qm
+            return qm
+
+        # Check drift → refresh quotes
+        if should_refresh(qm, mid, "QUOT "):
+            cancel_quoted(client, qm)
+            new_qm = place_quotes(client, market)
+            if new_qm:
+                return new_qm
 
     return qm
 
 
-def should_refresh(quoted: QuotedMarket, mid: float) -> bool:
+def should_refresh(quoted: QuotedMarket, mid: float, label: str = "") -> bool:
     """Check if midpoint has drifted beyond threshold (using pre-fetched mid)."""
     drift_pct = abs(mid - quoted.mid_at_placement) / quoted.mid_at_placement
-    log.info("%s | open: %.4f | now: %.4f | drift: %.1f%%",
-             quoted.market.ticker, quoted.mid_at_placement, mid, drift_pct * 100)
+    log.info("%s %s| open: %.4f | now: %.4f | drift: %.1f%%",
+             quoted.market.ticker, label, quoted.mid_at_placement, mid, drift_pct * 100)
     return drift_pct > config.REFRESH_THRESHOLD_PCT
 
 
@@ -248,24 +307,13 @@ def cancel_quoted(client: ClobClient, quoted: QuotedMarket) -> None:
         if quoted.no_exit_order_id:
             parts.append("NO exit")
         log.info("%s cancelled %d orders (%s)", quoted.market.ticker, len(order_ids), " + ".join(parts))
+        quoted.bid_order_id = None
+        quoted.ask_order_id = None
+        quoted.yes_exit_order_id = None
+        quoted.no_exit_order_id = None
     except Exception as e:
         log.error("%s cancel failed: %s", quoted.market.ticker, e)
-    quoted.bid_order_id = None
-    quoted.ask_order_id = None
-    quoted.yes_exit_order_id = None
-    quoted.no_exit_order_id = None
 
-
-def refresh_quotes(client: ClobClient, quoted: QuotedMarket) -> QuotedMarket | None:
-    """Cancel existing orders and re-place at current midpoint."""
-    had_yes_exit = quoted.yes_exit_order_id is not None
-    had_no_exit = quoted.no_exit_order_id is not None
-    cancel_quoted(client, quoted)
-    if had_yes_exit or had_no_exit:
-        sides = [s for s, had in [("YES", had_yes_exit), ("NO", had_no_exit)] if had]
-        log.info("%s exit orders cancelled (%s) — will re-place at new mid next cycle",
-                 quoted.market.ticker, " + ".join(sides))
-    return place_quotes(client, quoted.market)
 
 
 def cancel_all_quoted(client: ClobClient, quoted_markets: list[QuotedMarket]) -> None:
