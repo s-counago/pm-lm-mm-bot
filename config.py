@@ -21,8 +21,8 @@ TICKERS = []  # auto-builds daily equity "Up or Down" slugs
 # Each entry: {"slug": "event-slug"} for all incentivized outcomes,
 # or {"slug": "event-slug", "outcome": "Norway"} for a specific outcome.
 MARKETS: list[dict] = [
-    #{"slug": "spx-opens-up-or-down-on-february-12-2026"},
-    {"slug": "what-price-will-msft-hit-in-february-2026", "outcome": "↓ $390"}
+    {"slug": "spx-opens-up-or-down-on-february-13-2026"},
+    #{"slug": "of-views-of-mrbeast-video-day-6", "outcome": "50.0–50.5M"}
 ]
 
 # --- Quoting parameters ---
@@ -39,9 +39,20 @@ TEST_SIZE_OVERRIDE = None
 # Midpoint drift as a percentage before cancel+re-place (e.g. 0.10 = 10%)
 REFRESH_THRESHOLD_PCT = 0.005
 
+# Time-based exit escalation: start at entry + full spread (profit), reach entry (breakeven)
+EXIT_ESCALATION_SECONDS = 1800.0  # 30 minutes
+
+# Stop-loss: snap exit to current mid if mid moved against position by >= this fraction
+STOP_LOSS_PCT = 0.05
+
 # --- Timing ---
 # How often to check midpoint for drift (seconds)
 POLL_INTERVAL_SECONDS = 0.2
+
+# --- Market filters ---
+# Minimum midpoint to accept a market for two-sided quoting.
+# Markets below this can't place a valid bid (bid = mid - half_spread < 0.01).
+MIN_QUOTABLE_MID = 0.15
 
 # --- Inventory dumper ---
 INVENTORY_POLL_SECONDS = 0.5       # how often to check positions

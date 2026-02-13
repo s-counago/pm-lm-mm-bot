@@ -24,3 +24,5 @@ add stop loss/take profit system
 test if quoting while exiting positions work
 
 how does polymarket fill orders? are they a queue? does refreshing the orders make it less likely to get them filled?
+
+got adversarially selected against for sure on the mr beast market. why? what happened?
